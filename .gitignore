@@ -14,3 +14,4 @@ wheels/
 apikey.txt
 /data
 markdown.md
+.env

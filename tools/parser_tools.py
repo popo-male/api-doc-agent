@@ -1,5 +1,7 @@
 import json
 
+from google.genai import types
+
 
 def resolve_refs(obj, full_spec, visited=None):
     """
@@ -83,6 +85,66 @@ def parse_swagger(raw_json_string: str) -> dict:
         "total_endpoints": len(structured_endpoints),
         "endpoints": structured_endpoints,
     }
+
+
+def parse_wsdl(raw_xml_string: str) -> dict:
+    """
+    Parses a raw SOAP WSDL XML string and extracts operations and schemas.
+    Use this tool ONLY if the input looks like XML or a SOAP WSDL.
+    """
+    # Placeholder for future Zeep implementation
+    return {
+        "api_name": "SOAP API",
+        "endpoints": [
+            {
+                "path": "SampleService",
+                "method": "POST",
+                "summary": "Sample SOAP Operation",
+                "parameters": [],
+                "responses": [],
+            }
+        ],
+    }
+
+
+# Create proper Tool definitions for the Gemini API
+parse_swagger_tool = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="parse_swagger",
+            description="Parses a Swagger 2.0 JSON specification string and extracts API endpoints with their details including path, HTTP method, parameters, and response schemas.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "raw_json_string": types.Schema(
+                        type=types.Type.STRING,
+                        description="The complete Swagger/OpenAPI 2.0 JSON specification as a string. This must be the entire swagger.json content.",
+                    )
+                },
+                required=["raw_json_string"],
+            ),
+        )
+    ]
+)
+
+parse_wsdl_tool = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="parse_wsdl",
+            description="Parses a SOAP WSDL XML specification string and extracts operations and schemas. Use this ONLY if the input is XML or SOAP WSDL format.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "raw_xml_string": types.Schema(
+                        type=types.Type.STRING,
+                        description="The complete WSDL XML specification as a string.",
+                    )
+                },
+                required=["raw_xml_string"],
+            ),
+        )
+    ]
+)
 
 
 if __name__ == "__main__":

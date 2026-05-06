@@ -4,6 +4,7 @@ from pathlib import Path
 
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 from core.config import config
 from core.settings import settings
@@ -37,13 +38,16 @@ def generate_endpoint_doc(endpoint_data: dict) -> str:
     print(f"Documenting: {endpoint_data['method']} {endpoint_data['path']}")
     prompt = f"Please document this specific endpoint:\n{json.dumps(endpoint_data, indent=2)}"
 
-    response = client.models.generate_content(
-        model=settings.MODEL_NAME, contents=prompt, config=worker_config
-    )
-    return response.text
+    try:
+        response = client.models.generate_content(
+            model=settings.MODEL_NAME, contents=prompt, config=worker_config
+        )
+        return response.text or ""
+    except genai_errors.ServerError as exc:
+        return f"## {endpoint_data['method']} {endpoint_data['path']}\n\nError generating documentation: {exc}"
 
 
-def run_agent(raw_content: str):
+def run_agent(raw_content: str) -> str:
     print("Planner: analyzing raw input to determine API type...")
     # use chat session to maintain conversation history
     chat = client.chats.create(model=settings.MODEL_NAME, config=planner_config)
@@ -70,7 +74,12 @@ def run_agent(raw_content: str):
         return "Error: Planner Agent failed to identify the specification format and did not call a tool."
 
     if not parsed_data or "error" in parsed_data:
-        return f"Error extracting API data: {parsed_data.get('error', 'Unknown error')}"
+        error_msg = (
+            parsed_data.get("error", "Unknown error")
+            if parsed_data
+            else "Unknown error"
+        )
+        return f"Error extracting API data: {error_msg}"
 
     # set up for worker loop
     api_name = parsed_data.get("api_name", "API")

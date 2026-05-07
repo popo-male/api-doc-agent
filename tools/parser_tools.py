@@ -1,6 +1,10 @@
 import json
+import os
+import tempfile
 
+import zeep
 from google.genai import types
+from zeep.exceptions import XMLParseError
 
 
 def resolve_refs(obj, full_spec, visited=None, is_openapi_3=False):
@@ -148,19 +152,85 @@ def parse_wsdl(raw_xml_string: str) -> dict:
     Parses a raw SOAP WSDL XML string and extracts operations and schemas.
     Use this tool ONLY if the input looks like XML or a SOAP WSDL.
     """
-    # Placeholder for future Zeep implementation
-    return {
-        "api_name": "SOAP API",
-        "endpoints": [
-            {
-                "path": "SampleService",
-                "method": "POST",
-                "summary": "Sample SOAP Operation",
-                "parameters": [],
-                "responses": [],
-            }
-        ],
-    }
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".wsdl", delete=False, encoding="utf-8"
+        ) as tmp_file:
+            tmp_file.write(raw_xml_string)
+            tmp_file_path = tmp_file.name
+
+        client = zeep.Client(wsdl=tmp_file_path)
+        structured_endpoints = []
+        api_name = "SOAP Web Service"
+
+        for service in client.wsdl.services.values():
+            api_name = service.name
+            for port in service.ports.values():
+                for operation_name, operation in port.binding._operations.items():
+                    # EXACTLY what the LLM needs to understand the parameters.
+                    try:
+                        input_sig = (
+                            operation.input.signature() if operation.input else "None"
+                        )
+                    except Exception:
+                        input_sig = "Complex Input (Check WSDL)"
+
+                    try:
+                        output_sig = (
+                            operation.output.signature() if operation.output else "None"
+                        )
+                    except Exception:
+                        output_sig = "Complex Output (Check WSDL)"
+
+                    endpoint_data = {
+                        # use the port/operation as the path since SOAP typically hits one URL
+                        "path": f"/{service.name}/{port.name}/{operation_name}",
+                        "method": "POST",  # SOAP operations are universally POST requests
+                        "summary": f"SOAP Operation: {operation_name}",
+                        "description": f"Executes the {operation_name} action on the {port.name} port.",
+                        "operationId": operation_name,
+                        "parameters": [
+                            {
+                                "name": "SOAP Envelope",
+                                "in": "body",
+                                "description": f"Required XML Payload Structure:\n{input_sig}",
+                            }
+                        ],
+                        "responses": [
+                            {"description": "SOAP Response", "schema": output_sig}
+                        ],
+                        "tags": [port.name],  # Group endpoints by their Port name
+                    }
+                    structured_endpoints.append(endpoint_data)
+
+        os.remove(tmp_file_path)
+
+        grouped_endpoints = {}
+        for ep in structured_endpoints:
+            for tag in ep["tags"]:
+                if tag not in grouped_endpoints:
+                    grouped_endpoints[tag] = []
+                grouped_endpoints[tag].append(ep)
+
+        return {
+            "metadata": {
+                "title": api_name,
+                "version": "1.0 (SOAP)",
+                "description": "Auto-parsed SOAP WSDL Web Service. Operations are executed via XML envelopes over HTTP POST.",
+                "schemes": ["http", "https"],
+                "host": "SOAP-Host",
+                "basePath": "/",
+            },
+            "spec_version": "WSDL 1.1/2.0",
+            "total_endpoints": len(structured_endpoints),
+            "tags": grouped_endpoints,
+        }
+    except XMLParseError as e:
+        return {
+            "error": f"Invalid XML format. Make sure you provided a valid WSDL: {str(e)}"
+        }
+    except Exception as e:
+        return {"error": f"Zeep failed to parse WSDL: {str(e)}"}
 
 
 # Create proper Tool definitions for the Gemini API

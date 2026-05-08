@@ -8,8 +8,9 @@ from pydantic import BaseModel, field_validator
 class InstructionConfig(BaseModel):
     planner: str
     worker: str
+    reviewer: str
 
-    @field_validator("planner", "worker")
+    @field_validator("planner", "worker", "reviewer")
     @classmethod
     def normalize_instruction(cls, value: str) -> str:
         return dedent(value).strip()

@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 
+import yaml
 import zeep
 from google.genai import types
 from zeep.exceptions import XMLParseError
@@ -59,14 +60,15 @@ def resolve_refs(obj, full_spec, visited=None, is_openapi_3=False):
         return obj
 
 
-def parse_swagger(raw_json_string: str) -> dict:
+def parse_swagger(raw_string: str) -> dict:
     """
-    Parses a raw Swagger 2.0 JSON string and extracts a clean list of endpoints.
+    Parses a raw Swagger 2.0 YAML string and extracts a clean list of endpoints.
     """
     try:
-        spec = json.loads(raw_json_string)
-    except json.JSONDecodeError:
-        return {"error": "Invalid JSON format."}
+        # handle JSON and YAML
+        spec = yaml.safe_load(raw_string)
+    except yaml.YAMLError:
+        return {"error": "Invalid YAML or JSON format."}
 
     # version check
     is_openapi_3 = "openapi" in spec
@@ -74,15 +76,22 @@ def parse_swagger(raw_json_string: str) -> dict:
         spec.get("openapi") if is_openapi_3 else spec.get("swagger", "Unknown")
     )
 
+    if is_openapi_3:
+        servers = spec.get("servers", [{"url": "/"}])
+        base_url = servers[0].get("url", "/")
+    else:
+        url_schema = spec.get("schemes", ["https"])[0]
+        host = spec.get("host", "api.example.com")
+        base_path = spec.get("basePath", "")
+        base_url = f"{url_schema}://{host}{base_path}"
+
     # extract high-level API info
     api_info = spec.get("info", {})
     metadata = {
         "title": api_info.get("title", "Unknown API"),
         "version": api_info.get("version", "1.0"),
         "description": api_info.get("description", ""),
-        "host": spec.get("host", ""),
-        "basePath": spec.get("basePath", ""),
-        "schemes": spec.get("schemes", []),
+        "base_url": base_url,
         "securityDefinitions": spec.get("securityDefinitions", {})
         if not is_openapi_3
         else spec.get("components", {}).get("securitySchemes", {}),
@@ -90,12 +99,13 @@ def parse_swagger(raw_json_string: str) -> dict:
 
     paths = spec.get("paths", {})
     grouped_endpoints = {}
-    endpoints = []
-    total_endpoints = 0
+    flat_endpoints = []
 
     # loop through every URL path
-    for path_url, methods in paths.items():
-        for method_name, details in methods.items():
+    for path_url, path_data in paths.items():
+        path_level_params = path_data.get("parameters", [])
+
+        for method_name, details in path_data.items():
             # Skip non-HTTP methods like 'parameters' defined at the path level
             if method_name.lower() not in [
                 "get",
@@ -108,7 +118,24 @@ def parse_swagger(raw_json_string: str) -> dict:
             ]:
                 continue
 
-            total_endpoints += 1
+            raw_params = details.get("parameters", []) + path_level_params
+
+            if is_openapi_3 and "requestBody" in details:
+                req_body_desc = details["requestBody"].get(
+                    "description", "Request Payload"
+                )
+                for content_type, content_data in (
+                    details["requestBody"].get("content", {}).items()
+                ):
+                    body_schema = content_data.get("schema", {})
+                    raw_params.append(
+                        {
+                            "name": "requestBody",
+                            "in": f"body ({content_type})",
+                            "description": req_body_desc,
+                            "schema": body_schema,
+                        }
+                    )
 
             # Resolve parameters
             endpoint_data = {
@@ -117,19 +144,13 @@ def parse_swagger(raw_json_string: str) -> dict:
                 "summary": details.get("summary", ""),
                 "description": details.get("description", ""),
                 "operationId": details.get("operationId", ""),
-                "consumes": details.get("consumes", []),
-                "produces": details.get("produces", []),
-                "security": details.get("security", []),
-                "parameters": resolve_refs(
-                    details.get("parameters", []), spec, is_openapi_3=is_openapi_3
-                ),
+                "parameters": resolve_refs(raw_params, spec, is_openapi_3=is_openapi_3),
                 "responses": resolve_refs(
                     details.get("responses", {}), spec, is_openapi_3=is_openapi_3
                 ),
             }
 
-            endpoints.append(endpoint_data)
-
+            flat_endpoints.append(endpoint_data)
             # Group by tags
             tags = details.get("tags", ["Untagged"])
             for tag in tags:
@@ -138,11 +159,10 @@ def parse_swagger(raw_json_string: str) -> dict:
                 grouped_endpoints[tag].append(endpoint_data)
 
     return {
-        "api_name": metadata["title"],
         "metadata": metadata,
         "spec_version": spec_version,
-        "total_endpoints": total_endpoints,
-        "endpoints": endpoints,
+        "total_endpoints": len(flat_endpoints),
+        "endpoints": flat_endpoints,
         "tags": grouped_endpoints,
     }
 
@@ -161,10 +181,10 @@ def parse_wsdl(raw_xml_string: str) -> dict:
 
         client = zeep.Client(wsdl=tmp_file_path)
         structured_endpoints = []
-        api_name = "SOAP Web Service"
+        api_names = []
 
         for service in client.wsdl.services.values():
-            api_name = service.name
+            api_names.append(service.name)
             for port in service.ports.values():
                 for operation_name, operation in port.binding._operations.items():
                     # EXACTLY what the LLM needs to understand the parameters.
@@ -203,8 +223,6 @@ def parse_wsdl(raw_xml_string: str) -> dict:
                     }
                     structured_endpoints.append(endpoint_data)
 
-        os.remove(tmp_file_path)
-
         grouped_endpoints = {}
         for ep in structured_endpoints:
             for tag in ep["tags"]:
@@ -212,17 +230,18 @@ def parse_wsdl(raw_xml_string: str) -> dict:
                     grouped_endpoints[tag] = []
                 grouped_endpoints[tag].append(ep)
 
+        final_api_title = " & ".join(api_names) if api_names else "SOAP Web Service"
+
         return {
             "metadata": {
-                "title": api_name,
+                "title": final_api_title,
                 "version": "1.0 (SOAP)",
                 "description": "Auto-parsed SOAP WSDL Web Service. Operations are executed via XML envelopes over HTTP POST.",
-                "schemes": ["http", "https"],
-                "host": "SOAP-Host",
-                "basePath": "/",
+                "base_url": "SOAP-Host",
             },
-            "spec_version": "WSDL 1.1/2.0",
+            "spec_version": "WSDL 1.1",
             "total_endpoints": len(structured_endpoints),
+            "endpoints": structured_endpoints,
             "tags": grouped_endpoints,
         }
     except XMLParseError as e:
@@ -231,6 +250,9 @@ def parse_wsdl(raw_xml_string: str) -> dict:
         }
     except Exception as e:
         return {"error": f"Zeep failed to parse WSDL: {str(e)}"}
+    finally:
+        if os.path.exists(tmp_file_path):
+            os.remove(tmp_file_path)
 
 
 # Create proper Tool definitions for the Gemini API
